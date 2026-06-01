@@ -6,7 +6,7 @@
 #   bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/guming485-jpg/cc-desktop-releases/main/install.sh)
 #
 # 行为:
-#   1. 从 GitHub API 拉取最新版本号和 DMG 下载地址
+#   1. 从 GitHub API 拉取最新版本号和 DMG 下载地址（镜像 fallback）
 #   2. 通过国内镜像下载 DMG (gh-proxy.com → ghfast.top → 直连)
 #   3. 退出已运行的理财人CC
 #   4. 替换 /Applications/理财人CC.app
@@ -36,23 +36,66 @@ else
 fi
 echo "📦 当前架构: $ARCH_TAG"
 
-# ── 2. 拉取最新 release 信息 ──
+# ── 2. 拉取最新 release 信息（镜像 fallback）──
 echo "🔍 查询最新版本..."
-API_URL="https://api.github.com/repos/${REPO}/releases/latest"
-API_RESP=$(curl -fsSL --connect-timeout 10 "$API_URL" 2>/dev/null || true)
+API_ORIGINAL="https://api.github.com/repos/${REPO}/releases?per_page=10"
+API_MIRRORS=(
+    "https://gh-proxy.com/${API_ORIGINAL}"
+    "https://ghfast.top/${API_ORIGINAL}"
+    "${API_ORIGINAL}"
+)
+
+API_RESP=""
+for M in "${API_MIRRORS[@]}"; do
+    echo "   尝试: $M"
+    API_RESP=$(curl -fsSL --connect-timeout 10 --max-time 20 "$M" 2>/dev/null || true)
+    if [ -n "$API_RESP" ] && echo "$API_RESP" | grep -q '"tag_name"'; then
+        echo "   ✅ 成功"
+        break
+    fi
+    API_RESP=""
+done
 
 if [ -z "$API_RESP" ]; then
-    echo "❌ 无法访问 GitHub API,请检查网络"
+    echo "❌ 无法访问 GitHub API（所有镜像均失败），请检查网络"
     exit 1
 fi
 
-TAG=$(echo "$API_RESP" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
-DMG_URL=$(echo "$API_RESP" | grep '"browser_download_url"' | grep -E "${ARCH_TAG}\.dmg" | head -1 | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/')
+# 解析：取非 draft/prerelease 的最高版本
+TAG=""
+DMG_URL=""
+BEST_MAJOR=0; BEST_MINOR=0; BEST_PATCH=0
 
-if [ -z "$DMG_URL" ]; then
-    # 如果没有架构后缀的 DMG,fallback 到任意 dmg
-    DMG_URL=$(echo "$API_RESP" | grep '"browser_download_url"' | grep '\.dmg' | head -1 | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/')
-fi
+echo "$API_RESP" | python3 -c "
+import json, sys
+try:
+    releases = json.load(sys.stdin)
+    if not isinstance(releases, list):
+        sys.exit(1)
+    best = None
+    for r in releases:
+        if r.get('draft') or r.get('prerelease'): continue
+        t = (r.get('tag_name') or '').lstrip('vV')
+        parts = t.split('.')
+        major = int(parts[0]) if len(parts) > 0 else 0
+        minor = int(parts[1]) if len(parts) > 1 else 0
+        patch = int(parts[2]) if len(parts) > 2 else 0
+        if best is None or (major, minor, patch) > best[0]:
+            best = ((major, minor, patch), r)
+    if best:
+        r = best[1]
+        tag = r.get('tag_name', '')
+        print(tag)
+        for a in r.get('assets', []):
+            if a.get('name', '').endswith('.dmg'):
+                print(a.get('browser_download_url', ''))
+                break
+except:
+    sys.exit(1)
+" 2>/dev/null | {
+    read -r TAG
+    read -r DMG_URL
+}
 
 if [ -z "$TAG" ] || [ -z "$DMG_URL" ]; then
     echo "❌ 解析版本信息失败"
@@ -149,7 +192,10 @@ hdiutil detach "$MOUNT_POINT" -force 2>/dev/null || true
 # ── 9. 再次清除 quarantine (双保险) ──
 xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
 
-# ── 10. 启动 ──
+# ── 10. 刷新 Launch Services 缓存（修复问号图标）──
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_PATH" 2>/dev/null || true
+
+# ── 11. 启动 ──
 echo
 echo "🚀 启动 ${APP_NAME}..."
 open "$APP_PATH"
