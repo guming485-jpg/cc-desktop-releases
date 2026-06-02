@@ -2,16 +2,20 @@
 #
 # 理财人CC 一键安装/更新脚本
 #
-# 用法:
+# 推荐用法（兼容性最好）:
+#   curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/guming485-jpg/cc-desktop-releases/main/install.sh | bash
+#
+# 备用用法（部分系统可能显示"已损坏"）:
 #   bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/guming485-jpg/cc-desktop-releases/main/install.sh)
 #
 # 行为:
-#   1. 从 GitHub API 拉取最新版本号和 DMG 下载地址（镜像 fallback）
+#   1. 从 GitHub API 拉取最新版本号和 DMG 下载地址
 #   2. 通过国内镜像下载 DMG (gh-proxy.com → ghfast.top → 直连)
 #   3. 退出已运行的理财人CC
 #   4. 替换 /Applications/理财人CC.app
 #   5. 清除 macOS quarantine 标记 (绕过 Gatekeeper)
-#   6. 启动新版本
+#   6. 刷新 Launch Services 缓存 (修复问号图标)
+#   7. 启动新版本
 
 set -e
 
@@ -36,8 +40,12 @@ else
 fi
 echo "📦 当前架构: $ARCH_TAG"
 
-# ── 2. 拉取最新 release 信息（镜像 fallback）──
+# ── 2. 拉取最新 release 信息 ──
+# 说明：解析只用 grep/sed（macOS 自带），绝不依赖 python3/jq——干净 macOS 不预装这些，
+# 一旦依赖外部运行时，新用户机器会卡在解析步骤报"解析版本信息失败"。
 echo "🔍 查询最新版本..."
+# 注意：用 releases?per_page=10 而非 releases/latest——后者经 gh-proxy 代理会返回空。
+# 数组首元素即最新发布（GitHub 按创建时间倒序），grep -m1 正好取到。
 API_ORIGINAL="https://api.github.com/repos/${REPO}/releases?per_page=10"
 API_MIRRORS=(
     "https://gh-proxy.com/${API_ORIGINAL}"
@@ -46,9 +54,9 @@ API_MIRRORS=(
 )
 
 API_RESP=""
-for M in "${API_MIRRORS[@]}"; do
-    echo "   尝试: $M"
-    API_RESP=$(curl -fsSL --connect-timeout 10 --max-time 20 "$M" 2>/dev/null || true)
+for AM in "${API_MIRRORS[@]}"; do
+    echo "   尝试: $AM"
+    API_RESP=$(curl -fsSL --connect-timeout 10 "$AM" 2>/dev/null || true)
     if [ -n "$API_RESP" ] && echo "$API_RESP" | grep -q '"tag_name"'; then
         echo "   ✅ 成功"
         break
@@ -57,48 +65,15 @@ for M in "${API_MIRRORS[@]}"; do
 done
 
 if [ -z "$API_RESP" ]; then
-    echo "❌ 无法访问 GitHub API（所有镜像均失败），请检查网络"
+    echo "❌ 无法访问 GitHub API（所有镜像均失败）,请检查网络"
     exit 1
 fi
 
-# 解析：取非 draft/prerelease 的最高版本
-TAG=""
-DMG_URL=""
-BEST_MAJOR=0; BEST_MINOR=0; BEST_PATCH=0
-
-echo "$API_RESP" | python3 -c "
-import json, sys
-try:
-    releases = json.load(sys.stdin)
-    if not isinstance(releases, list):
-        sys.exit(1)
-    best = None
-    for r in releases:
-        if r.get('draft') or r.get('prerelease'): continue
-        t = (r.get('tag_name') or '').lstrip('vV')
-        parts = t.split('.')
-        major = int(parts[0]) if len(parts) > 0 else 0
-        minor = int(parts[1]) if len(parts) > 1 else 0
-        patch = int(parts[2]) if len(parts) > 2 else 0
-        if best is None or (major, minor, patch) > best[0]:
-            best = ((major, minor, patch), r)
-    if best:
-        r = best[1]
-        tag = r.get('tag_name', '')
-        print(tag)
-        for a in r.get('assets', []):
-            if a.get('name', '').endswith('.dmg'):
-                print(a.get('browser_download_url', ''))
-                break
-except:
-    sys.exit(1)
-" 2>/dev/null | {
-    read -r TAG
-    read -r DMG_URL
-}
+TAG=$(echo "$API_RESP" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+DMG_URL=$(echo "$API_RESP" | grep '"browser_download_url"' | grep -E "${ARCH_TAG}\.dmg" | head -1 | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/')
 
 if [ -z "$TAG" ] || [ -z "$DMG_URL" ]; then
-    echo "❌ 解析版本信息失败"
+    echo "❌ 无法解析版本信息"
     exit 1
 fi
 
@@ -177,12 +152,16 @@ if [ ! -d "$SRC" ]; then
     exit 1
 fi
 
-# ── 7. 替换到 /Applications ──
+# ── 7. 替换到 /Applications (原子操作) ──
 echo
 echo "📦 安装到 ${APP_PATH}..."
 STAGING="/Applications/.cc-staging-$$.app"
 cp -R "$SRC" "$STAGING"
+
+# 清除隔离标记 (避免 Gatekeeper 警告)
 xattr -dr com.apple.quarantine "$STAGING" 2>/dev/null || true
+
+# 原子替换
 rm -rf "$APP_PATH"
 mv "$STAGING" "$APP_PATH"
 
@@ -192,8 +171,13 @@ hdiutil detach "$MOUNT_POINT" -force 2>/dev/null || true
 # ── 9. 再次清除 quarantine (双保险) ──
 xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
 
-# ── 10. 刷新 Launch Services 缓存（修复问号图标）──
+# ── 10. 刷新 Launch Services 缓存 (修复问号图标) ──
+echo
+echo "🔄 刷新系统缓存..."
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_PATH" 2>/dev/null || true
+
+# 注意：不要 killall Dock —— Dock 同时渲染桌面壁纸，重启 Dock 在与 open 竞态下
+# 可能导致桌面变黑无法恢复。lsregister -f 已足够刷新图标，启动后系统会再次注册。
 
 # ── 11. 启动 ──
 echo
@@ -204,3 +188,5 @@ echo
 echo "─────────────────────────────────────"
 echo "  ✅ 安装完成! 版本: $TAG"
 echo "─────────────────────────────────────"
+echo
+echo "💡 提示: 如果图标显示问号,请稍等几秒或重新登录让系统刷新"
