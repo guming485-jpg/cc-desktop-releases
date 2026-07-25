@@ -159,7 +159,7 @@ fi
 # ── 7. 替换到 /Applications (原子操作) ──
 echo
 echo "📦 安装到 ${APP_PATH}..."
-STAGING="/Applications/.alphox-staging-$.app"
+STAGING="/Applications/.alphox-staging-$$.app"
 cp -R "$SRC" "$STAGING"
 
 # 清除隔离标记 (避免 Gatekeeper 警告)
