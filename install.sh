@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# 理财人CC 一键安装/更新脚本
+# Alphox 一键安装/更新脚本
 #
 # 推荐用法（兼容性最好）:
 #   curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/guming485-jpg/cc-desktop-releases/main/install.sh | bash
@@ -11,20 +11,22 @@
 # 行为:
 #   1. 从 GitHub API 拉取最新版本号和 DMG 下载地址
 #   2. 通过国内镜像下载 DMG (gh-proxy.com → ghfast.top → 直连)
-#   3. 退出已运行的理财人CC
-#   4. 替换 /Applications/理财人CC.app
+#   3. 退出已运行的 Alphox 或理财人CC
+#   4. 替换 /Applications/Alphox.app，并移除旧名称应用
 #   5. 清除 macOS quarantine 标记 (绕过 Gatekeeper)
 #   6. 刷新 Launch Services 缓存 (修复问号图标)
 #   7. 启动新版本
 
 set -e
 
-APP_NAME="理财人CC"
+APP_NAME="Alphox"
+LEGACY_APP_NAME="理财人CC"
 APP_PATH="/Applications/${APP_NAME}.app"
+LEGACY_APP_PATH="/Applications/${LEGACY_APP_NAME}.app"
 REPO="guming485-jpg/cc-desktop-releases"
 
 echo "─────────────────────────────────────"
-echo "  理财人CC 自动安装/更新"
+echo "  Alphox 自动安装/更新"
 echo "─────────────────────────────────────"
 echo
 
@@ -81,7 +83,7 @@ echo "✨ 最新版本: $TAG"
 echo "🔗 DMG URL: $DMG_URL"
 
 # ── 3. 镜像 fallback 下载 ──
-TMP_DMG=$(mktemp -t cc-install-XXXXXX.dmg)
+TMP_DMG=$(mktemp -t alphox-install-XXXXXX.dmg)
 trap "rm -f '$TMP_DMG'" EXIT
 
 MIRRORS=(
@@ -115,17 +117,19 @@ if [ $DOWNLOADED -eq 0 ]; then
 fi
 
 # ── 4. 退出旧版本 ──
-if pgrep -f "${APP_NAME}.app/Contents/MacOS" > /dev/null; then
-    echo
-    echo "🛑 退出当前运行的 ${APP_NAME}..."
-    osascript -e "quit app \"${APP_NAME}\"" 2>/dev/null || true
-    for i in $(seq 1 15); do
-        if ! pgrep -f "${APP_NAME}.app/Contents/MacOS" > /dev/null; then break; fi
+for RUNNING_APP in "$APP_NAME" "$LEGACY_APP_NAME"; do
+    if pgrep -f "${RUNNING_APP}.app/Contents/MacOS" > /dev/null; then
+        echo
+        echo "🛑 退出当前运行的 ${RUNNING_APP}..."
+        osascript -e "quit app \"${RUNNING_APP}\"" 2>/dev/null || true
+        for i in $(seq 1 15); do
+            if ! pgrep -f "${RUNNING_APP}.app/Contents/MacOS" > /dev/null; then break; fi
+            sleep 1
+        done
+        pkill -9 -f "${RUNNING_APP}.app/Contents/MacOS" 2>/dev/null || true
         sleep 1
-    done
-    pkill -9 -f "${APP_NAME}.app/Contents/MacOS" 2>/dev/null || true
-    sleep 1
-fi
+    fi
+done
 
 # ── 5. 挂载 DMG ──
 echo
@@ -155,14 +159,18 @@ fi
 # ── 7. 替换到 /Applications (原子操作) ──
 echo
 echo "📦 安装到 ${APP_PATH}..."
-STAGING="/Applications/.cc-staging-$$.app"
+STAGING="/Applications/.alphox-staging-$.app"
 cp -R "$SRC" "$STAGING"
 
 # 清除隔离标记 (避免 Gatekeeper 警告)
 xattr -dr com.apple.quarantine "$STAGING" 2>/dev/null || true
 
-# 原子替换
+# 原子替换；仅清理这两个明确的同产品安装路径，避免新旧名称并存。
 rm -rf "$APP_PATH"
+if [ -d "$LEGACY_APP_PATH" ]; then
+    echo "🧹 清理旧名称应用: ${LEGACY_APP_PATH}"
+    rm -rf "$LEGACY_APP_PATH"
+fi
 mv "$STAGING" "$APP_PATH"
 
 # ── 8. 卸载 DMG ──
