@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "revision": "2026-08-03.1",
+  "mirrors": [
+    {
+      "id": "gh-proxy",
+      "urlTemplate": "https://gh-proxy.com/{url}"
+    },
+    {
+      "id": "ghfast",
+      "urlTemplate": "https://ghfast.top/{url}"
+    },
+    {
+      "id": "github",
+      "urlTemplate": "{url}"
+    }
+  ],
+  "download": {
+    "concurrency": 8,
+    "chunkBytes": 16777216,
+    "probeBytes": 1048576,
+    "probeTimeoutMs": 5000,
+    "connectTimeoutMs": 10000,
+    "stallTimeoutMs": 8000,
+    "minimumBytesPerSecond": 1024,
+    "retries": 1
+  }
+}
