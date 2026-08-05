@@ -9,7 +9,7 @@
 #   bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/guming485-jpg/cc-desktop-releases/main/install.sh)
 #
 # 行为:
-#   1. 从 GitHub API 拉取最新版本号和 DMG 下载地址
+#   1. 从 GitHub 最新 Release 页面解析同一版本的 DMG 下载地址
 #   2. 通过国内镜像下载 DMG (gh-proxy.com → ghfast.top → 直连)
 #   3. 退出已运行的 Alphox 或理财人CC
 #   4. 替换 /Applications/Alphox.app，并移除旧名称应用
@@ -46,36 +46,65 @@ echo "📦 当前架构: $ARCH_TAG"
 # 说明：解析只用 grep/sed（macOS 自带），绝不依赖 python3/jq——干净 macOS 不预装这些，
 # 一旦依赖外部运行时，新用户机器会卡在解析步骤报"解析版本信息失败"。
 echo "🔍 查询最新版本..."
-# 注意：用 releases?per_page=10 而非 releases/latest——后者经 gh-proxy 代理会返回空。
-# 数组首元素即最新发布（GitHub 按创建时间倒序），grep -m1 正好取到。
-API_ORIGINAL="https://api.github.com/repos/${REPO}/releases?per_page=10"
-API_MIRRORS=(
-    "https://gh-proxy.com/${API_ORIGINAL}"
-    "https://ghfast.top/${API_ORIGINAL}"
-    "${API_ORIGINAL}"
+# 不再依赖 GitHub API：公共代理共享 API 限额，耗尽后会让所有用户同时失败。
+# latest 页面只负责给出 tag，expanded_assets 只在该 tag 内选包，避免从历史 Release 误捞旧 DMG。
+LATEST_ORIGINAL="https://github.com/${REPO}/releases/latest"
+LATEST_MIRRORS=(
+    "https://gh-proxy.com/${LATEST_ORIGINAL}"
+    "https://ghfast.top/${LATEST_ORIGINAL}"
+    "${LATEST_ORIGINAL}"
 )
 
-API_RESP=""
-for AM in "${API_MIRRORS[@]}"; do
-    echo "   尝试: $AM"
-    API_RESP=$(curl -fsSL --connect-timeout 10 "$AM" 2>/dev/null || true)
-    if [ -n "$API_RESP" ] && echo "$API_RESP" | grep -q '"tag_name"'; then
+TAG=""
+for LATEST_URL in "${LATEST_MIRRORS[@]}"; do
+    echo "   尝试: $LATEST_URL"
+    LATEST_RESP=$(curl -fsSL --connect-timeout 10 --max-time 30 "$LATEST_URL" 2>/dev/null || true)
+    TAG=$(printf '%s\n' "$LATEST_RESP" \
+        | grep -m1 -Eo "/${REPO}/releases/tag/[^\"<]+" \
+        | sed -E 's#^.*/releases/tag/##' || true)
+    if printf '%s\n' "$TAG" | grep -Eq '^v?[0-9]+(\.[0-9]+){2}([._-][[:alnum:]]+)*$'; then
         echo "   ✅ 成功"
         break
     fi
-    API_RESP=""
+    TAG=""
 done
 
-if [ -z "$API_RESP" ]; then
-    echo "❌ 无法访问 GitHub API（所有镜像均失败）,请检查网络"
+if [ -z "$TAG" ]; then
+    echo "❌ 无法查询 GitHub 最新 Release（所有镜像均失败）,请检查网络"
     exit 1
 fi
 
-TAG=$(echo "$API_RESP" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
-DMG_URL=$(echo "$API_RESP" | grep '"browser_download_url"' | grep -E "${ARCH_TAG}\.dmg" | head -1 | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/')
+ASSETS_ORIGINAL="https://github.com/${REPO}/releases/expanded_assets/${TAG}"
+ASSETS_MIRRORS=(
+    "https://gh-proxy.com/${ASSETS_ORIGINAL}"
+    "https://ghfast.top/${ASSETS_ORIGINAL}"
+    "${ASSETS_ORIGINAL}"
+)
+
+DMG_REF=""
+for ASSETS_URL in "${ASSETS_MIRRORS[@]}"; do
+    echo "   尝试制品列表: $ASSETS_URL"
+    ASSETS_RESP=$(curl -fsSL --connect-timeout 10 --max-time 30 "$ASSETS_URL" 2>/dev/null || true)
+    DMG_REF=$(printf '%s\n' "$ASSETS_RESP" \
+        | grep -Eo 'href="[^"]+/releases/download/[^"]+\.dmg"' \
+        | sed -E 's/^href="([^"]+)"$/\1/' \
+        | grep -F "/download/${TAG}/" \
+        | grep -E -- "-${ARCH_TAG}([._-][[:alnum:]]+)*\.dmg$" \
+        | head -1 || true)
+    if [ -n "$DMG_REF" ]; then
+        echo "   ✅ 找到当前版本制品"
+        break
+    fi
+done
+
+case "$DMG_REF" in
+    http://*|https://*) DMG_URL="$DMG_REF" ;;
+    /*) DMG_URL="https://github.com${DMG_REF}" ;;
+    *) DMG_URL="" ;;
+esac
 
 if [ -z "$TAG" ] || [ -z "$DMG_URL" ]; then
-    echo "❌ 无法解析版本信息"
+    echo "❌ ${TAG} 没有匹配当前架构 ${ARCH_TAG} 的 DMG，已停止；不会降级安装历史版本"
     exit 1
 fi
 
